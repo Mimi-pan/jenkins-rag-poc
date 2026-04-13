@@ -55,7 +55,21 @@ def load_index(embeddings: OllamaEmbeddings) -> FAISS:
 
 def retrieve(vectorstore: FAISS, question: str) -> list[tuple]:
     """Return list of (Document, score) tuples. Lower score = more similar."""
-    return vectorstore.similarity_search_with_score(question, k=TOP_K)
+    results = vectorstore.similarity_search_with_score(question, k=TOP_K)
+
+    if "plugin" not in question.lower():
+        return results
+
+    plugin_boost = 1.0
+    reranked = []
+    for doc, score in results:
+        adjusted_score = score
+        if doc.metadata.get("source_type") == "jenkins_plugin":
+            adjusted_score -= plugin_boost
+        reranked.append((doc, score, adjusted_score))
+
+    reranked.sort(key=lambda item: item[2])
+    return [(doc, original_score) for doc, original_score, _ in reranked]
 
 
 def build_context(results: list[tuple]) -> tuple[str, list[str]]:
