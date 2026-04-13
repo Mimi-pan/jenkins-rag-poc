@@ -1,0 +1,17 @@
+# requirements.txt — Jenkins RAG PoC dependencies
+
+# Web crawling & HTML parsing
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2
+
+# LangChain core + integrations
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-ollama==0.2.3
+
+# Vector store
+faiss-cpu==1.8.0
+
+# Environment variable management
+python-dotenv==1.0.1

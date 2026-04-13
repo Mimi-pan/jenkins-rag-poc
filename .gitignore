@@ -1,0 +1,8 @@
+.env
+jenkins_index/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.docx
