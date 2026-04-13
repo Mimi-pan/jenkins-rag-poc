@@ -16,7 +16,7 @@ load_dotenv()
 OLLAMA_BASE_URL        = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 INDEX_PATH             = "jenkins_index"
-TOP_K                  = 3
+TOP_K                  = 8
 SIMILARITY_THRESHOLD   = 3.0
 FALLBACK               = "I could not find this in the Jenkins documentation."
 
