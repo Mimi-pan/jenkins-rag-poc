@@ -5,6 +5,7 @@ ingest.py — Crawl Jenkins docs, chunk, embed, and store in a FAISS index.
 import os
 import re
 import pickle
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
@@ -18,53 +19,128 @@ load_dotenv()
 OLLAMA_BASE_URL        = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 
-URLS = [
-    "https://www.jenkins.io/doc/book/pipeline/",
-    "https://www.jenkins.io/doc/book/pipeline/jenkinsfile/",
-    "https://www.jenkins.io/doc/book/pipeline/syntax/",
-    "https://www.jenkins.io/doc/book/using/using-credentials/",
-    "https://www.jenkins.io/doc/book/system-administration/monitoring/",
-    "https://www.jenkins.io/doc/book/troubleshooting/",
-    "https://www.jenkins.io/doc/book/managing/",
-    "https://www.jenkins.io/doc/book/managing/plugins/",
-    "https://www.jenkins.io/doc/book/system-administration/reverse-proxy-configuration-troubleshooting/",
+SOURCES = [
+    {"url": "https://www.jenkins.io/doc/book/pipeline/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/pipeline/jenkinsfile/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/pipeline/syntax/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/using/using-credentials/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/system-administration/monitoring/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/troubleshooting/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/managing/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/managing/plugins/", "source_type": "jenkins_docs"},
+    {"url": "https://www.jenkins.io/doc/book/system-administration/reverse-proxy-configuration-troubleshooting/", "source_type": "jenkins_docs"},
+    {"url": "https://plugins.jenkins.io/workflow-aggregator/", "source_type": "jenkins_plugin"},
+    {"url": "https://plugins.jenkins.io/git/", "source_type": "jenkins_plugin"},
+    {"url": "https://plugins.jenkins.io/kubernetes/", "source_type": "jenkins_plugin"},
 ]
 
 INDEX_PATH = "jenkins_index"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def fetch_text(url: str) -> str:
-    """Download a page and return clean visible text."""
+def derive_title(soup: BeautifulSoup) -> str:
+    """Best-effort page title extraction."""
+    title_tag = soup.find("h1") or soup.find("title")
+    if not title_tag:
+        return ""
+    return re.sub(r"\s+", " ", title_tag.get_text(" ", strip=True)).strip()
+
+
+def build_page_metadata(url: str, source_type: str, soup: BeautifulSoup) -> dict:
+    """Build stable metadata for a fetched page."""
+    parsed = urlparse(url)
+    path_parts = [part for part in parsed.path.strip("/").split("/") if part]
+    metadata = {
+        "source": url,
+        "source_type": source_type,
+        "domain": parsed.netloc,
+        "title": derive_title(soup),
+    }
+
+    if source_type == "jenkins_plugin":
+        plugin_id = path_parts[0] if path_parts else ""
+        metadata["plugin_id"] = plugin_id
+        metadata["plugin_name"] = metadata["title"] or plugin_id.replace("-", " ").title()
+
+    return metadata
+
+
+def extract_docs_text(soup: BeautifulSoup) -> str:
+    """Extract visible text from a jenkins.io docs page."""
+    for tag in soup(["nav", "footer", "script", "style", "header"]):
+        tag.decompose()
+
+    main = soup.find("main") or soup.find("article") or soup.body
+    text = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def extract_plugin_text(soup: BeautifulSoup) -> str:
+    """Extract main plugin-page content while trimming site chrome."""
+    for tag in soup(["nav", "footer", "script", "style", "header", "noscript"]):
+        tag.decompose()
+
+    # Plugin pages are not identical to jenkins.io docs pages, so prefer
+    # likely content containers before falling back to the whole body.
+    selectors = [
+        "main",
+        "article",
+        '[role="main"]',
+        ".plugin-content",
+        ".container .row",
+    ]
+    main = None
+    for selector in selectors:
+        main = soup.select_one(selector)
+        if main:
+            break
+    if main is None:
+        main = soup.body
+
+    text = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def fetch_page(url: str, source_type: str) -> dict:
+    """Download a page and return normalized text plus metadata."""
     headers = {"User-Agent": "Jenkins-RAG-PoC/1.0 (GSoC 2026)"}
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # Remove navigation / footer noise
-    for tag in soup(["nav", "footer", "script", "style", "header"]):
-        tag.decompose()
+    metadata = build_page_metadata(url, source_type, soup)
+    if source_type == "jenkins_plugin":
+        text = extract_plugin_text(soup)
+    else:
+        text = extract_docs_text(soup)
 
-    # Prefer the main content block
-    main = soup.find("main") or soup.find("article") or soup.body
-    text = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
-
-    # Collapse excessive blank lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return {
+        "url": url,
+        "text": text,
+        "metadata": metadata,
+    }
 
 
-def crawl_pages(urls: list[str]) -> list[dict]:
-    """Return list of {url, text} dicts."""
+def crawl_pages(sources: list[dict]) -> list[dict]:
+    """Return normalized page records with text and metadata."""
+    
     pages = []
-    for url in urls:
-        print(f"  Fetching: {url}")
+
+    for source in sources:
+        url = source["url"]
+        source_type = source.get("source_type", "jenkins_docs")
+
+        print("INDEXING:", url)
+
         try:
-            text = fetch_text(url)
-            pages.append({"url": url, "text": text})
-            print(f"    → {len(text):,} characters")
+            page = fetch_page(url, source_type)
+            pages.append(page)
+            print(f" -> {len(page['text'])} characters")
+
         except Exception as exc:
-            print(f"    ✗ Failed ({exc})")
+            print(f" X Failed ({exc})")
+
     return pages
 
 
@@ -84,7 +160,12 @@ def split_into_chunks(pages: list[dict]) -> list[dict]:
     for page in pages:
         parts = splitter.split_text(page["text"])
         for part in parts:
-            chunks.append({"url": page["url"], "text": part})
+            chunk = {
+                "url": page["url"],
+                "text": part,
+                "metadata": dict(page.get("metadata", {})),
+            }
+            chunks.append(chunk)
     return chunks
 
 
@@ -95,7 +176,7 @@ def main():
 
     # 1. Crawl
     print("[1/4] Crawling Jenkins documentation pages …")
-    pages = crawl_pages(URLS)
+    pages = crawl_pages(SOURCES)
     print(f"      Total pages fetched: {len(pages)}\n")
 
     # 2. Chunk
@@ -110,8 +191,8 @@ def main():
         base_url=OLLAMA_BASE_URL,
     )
 
-    texts    = [c["text"] for c in chunks]
-    metadatas = [{"source": c["url"]} for c in chunks]
+    texts = [c["text"] for c in chunks]
+    metadatas = [c["metadata"] for c in chunks]
 
     # 4. Build & save FAISS index
     print("[4/4] Building FAISS index and saving to disk …")
