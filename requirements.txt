@@ -13,5 +13,8 @@ langchain-ollama==0.2.3
 # Vector store
 faiss-cpu==1.8.0
 
+# BM25 keyword retrieval
+rank-bm25==0.2.2
+
 # Environment variable management
 python-dotenv==1.0.1

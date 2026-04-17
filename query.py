@@ -7,9 +7,14 @@ Usage:
 
 import os
 import sys
+import pickle
+import re
+import hashlib
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
+from rank_bm25 import BM25Okapi
 
 # ── Environment ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -22,9 +27,14 @@ TOP_K = 3
 
 # FAISS similarity_search_with_score returns distance for FAISS.
 # Lower = more similar. Tune this later if needed.
-SIMILARITY_THRESHOLD = 3.0
+SIMILARITY_THRESHOLD = 1.5
 
 FALLBACK = "I could not find this in the Jenkins documentation."
+STOPWORDS = {
+    "a", "an", "and", "are", "best", "can", "do", "does", "for", "help",
+    "how", "i", "in", "is", "it", "my", "of", "provide", "provides",
+    "should", "tell", "the", "to", "what", "with",
+}
 
 SYSTEM_PROMPT = """You are a Jenkins documentation assistant.
 Answer the user's question STRICTLY using the context provided below.
@@ -53,23 +63,139 @@ def load_index(embeddings: OllamaEmbeddings) -> FAISS:
     )
 
 
-def retrieve(vectorstore: FAISS, question: str) -> list[tuple]:
-    """Return list of (Document, score) tuples. Lower score = more similar."""
-    results = vectorstore.similarity_search_with_score(question, k=TOP_K)
+def load_chunks() -> list[dict]:
+    """Load raw chunks saved by ingest.py."""
+    path = os.path.join(INDEX_PATH, "chunks.pkl")
+    if not os.path.exists(path):
+        return []
+    with open(path, "rb") as f:
+        return pickle.load(f)
 
-    if "plugin" not in question.lower():
-        return results
 
-    plugin_boost = 1.0
-    reranked = []
-    for doc, score in results:
-        adjusted_score = score
-        if doc.metadata.get("source_type") == "jenkins_plugin":
-            adjusted_score -= plugin_boost
-        reranked.append((doc, score, adjusted_score))
+def build_bm25(chunks: list[dict]) -> BM25Okapi | None:
+    """Build a BM25 index from chunk texts."""
+    if not chunks:
+        return None
+    tokenized = [tokenize_text(chunk["text"]) for chunk in chunks]
+    return BM25Okapi(tokenized)
 
-    reranked.sort(key=lambda item: item[2])
-    return [(doc, original_score) for doc, original_score, _ in reranked]
+
+def tokenize_text(text: str) -> list[str]:
+    """Tokenize text for lexical retrieval while keeping plugin-like terms intact."""
+    return re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", text.lower())
+
+
+def make_result_key(text: str, metadata: dict | None = None) -> str:
+    """Create a stable key for deduplicating retrieval results."""
+    source = str((metadata or {}).get("source", "unknown"))
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    return f"{source}:{digest}"
+
+
+def extract_query_terms(question: str) -> list[str]:
+    """Keep only meaningful query terms for support checks."""
+    return [
+        token for token in tokenize_text(question)
+        if token not in STOPWORDS and len(token) >= 3
+    ]
+
+
+def has_question_support(question: str, results: list[tuple]) -> bool:
+    """Reject answers when retrieved text does not support the query terms."""
+    terms = extract_query_terms(question)
+    if not terms:
+        return True
+
+    searchable_parts = []
+    for doc, _ in results:
+        metadata = doc.metadata or {}
+        searchable_parts.extend([
+            doc.page_content,
+            str(metadata.get("title", "")),
+            str(metadata.get("source", "")),
+            str(metadata.get("plugin_name", "")),
+            str(metadata.get("plugin_id", "")),
+        ])
+
+    haystack = "\n".join(part.lower() for part in searchable_parts if part)
+    matched_terms = [term for term in terms if term in haystack]
+
+    if len(terms) == 1:
+        return len(matched_terms) == 1
+
+    required_matches = min(2, len(terms))
+    return len(set(matched_terms)) >= required_matches
+
+
+def retrieve(
+    vectorstore: FAISS,
+    question: str,
+    chunks: list[dict] | None = None,
+    bm25: BM25Okapi | None = None,
+) -> list[tuple]:
+    """Hybrid FAISS + BM25 retrieval with Reciprocal Rank Fusion (RRF)."""
+    CANDIDATE_K = min(10, TOP_K * 3)
+    RRF_K = 60
+    lowered = question.lower()
+
+    # ── 1. FAISS retrieval ────────────────────────────────────────────────────
+    faiss_results = vectorstore.similarity_search_with_score(question, k=CANDIDATE_K)
+
+    rrf_scores: dict[str, float] = {}
+    doc_store:  dict[str, Document] = {}
+    faiss_score_store: dict[str, float] = {}
+
+    for rank, (doc, score) in enumerate(faiss_results):
+        key = make_result_key(doc.page_content, doc.metadata)
+        rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (RRF_K + rank + 1)
+        doc_store[key] = doc
+        faiss_score_store[key] = score
+
+    # ── 2. BM25 retrieval ─────────────────────────────────────────────────────
+    if bm25 and chunks:
+        tokens = tokenize_text(question)
+        bm25_scores = bm25.get_scores(tokens)
+        top_indices = sorted(
+            range(len(bm25_scores)),
+            key=lambda i: bm25_scores[i],
+            reverse=True,
+        )[:CANDIDATE_K]
+
+        for rank, idx in enumerate(top_indices):
+            if bm25_scores[idx] <= 0:
+                break
+            chunk = chunks[idx]
+            key = make_result_key(chunk["text"], chunk.get("metadata", {}))
+            rrf_scores[key] = rrf_scores.get(key, 0) + 1 / (RRF_K + rank + 1)
+            if key not in doc_store:
+                doc_store[key] = Document(
+                    page_content=chunk["text"],
+                    metadata=chunk.get("metadata", {}),
+                )
+                faiss_score_store[key] = 0.0   # BM25-only doc has no FAISS distance
+
+    # ── 3. Plugin-aware boost ─────────────────────────────────────────────────
+    candidates = []
+    for key, rrf in rrf_scores.items():
+        doc = doc_store[key]
+        adjusted_rrf = rrf
+
+        if "plugin" in lowered:
+            meta = doc.metadata or {}
+            plugin_name = str(meta.get("plugin_name", "")).lower()
+            plugin_id   = str(meta.get("plugin_id",   "")).lower()
+            if meta.get("source_type") == "jenkins_plugin":
+                adjusted_rrf += 0.02
+            if plugin_name and plugin_name in lowered:
+                adjusted_rrf += 0.05
+            if plugin_id and plugin_id in lowered:
+                adjusted_rrf += 0.05
+
+        candidates.append((doc, faiss_score_store[key], adjusted_rrf))
+
+    # ── 4. Sort by RRF descending, return TOP_K ───────────────────────────────
+    candidates.sort(key=lambda x: x[2], reverse=True)
+    return [(doc, score) for doc, score, _ in candidates[:TOP_K]]
 
 
 def build_context(results: list[tuple]) -> tuple[str, list[str]]:
@@ -139,34 +265,58 @@ def main():
     )
     vectorstore = load_index(embeddings)
 
-    # 2. Retrieve relevant chunks
-    results = retrieve(vectorstore, question)
+    # 2. Load BM25 (keyword retrieval)
+    chunks = load_chunks()
+    bm25 = build_bm25(chunks)
+    if bm25:
+        print("   BM25 index loaded ✓")
+
+    # 3. Retrieve relevant chunks (hybrid FAISS + BM25)
+    results = retrieve(vectorstore, question, chunks=chunks, bm25=bm25)
 
     if not results:
         print(f"💬 Answer:\n{FALLBACK}\n")
         return
 
-    # 3. Check best retrieval score
+    # 4. Check best retrieval score (FAISS distance; 0.0 means BM25-only doc)
     best_score = results[0][1]
-    print(f"   Best similarity distance: {best_score:.4f}")
+    if best_score > 0:
+        print(f"   Best similarity distance: {best_score:.4f}")
+        if best_score > SIMILARITY_THRESHOLD:
+            print(f"\n💬 Answer:\n{FALLBACK}\n")
+            return
 
-    if best_score > SIMILARITY_THRESHOLD:
-        print(f"\n💬 Answer:\n{FALLBACK}\n")
-        return
-
-    # 4. Build context
+    # 5. Build context
     context, sources = build_context(results)
 
     if not context:
         print(f"\n💬 Answer:\n{FALLBACK}\n")
         return
 
-    # 5. Query LLM
+    if not has_question_support(question, results):
+        print(f"\n💬 Answer:\n{FALLBACK}\n")
+        return
+
+    # 6. Query LLM
     print("Querying Ollama...")
     answer = ask_llm(question, context, sources)
 
-    # 6. Safety net (strong fallback)
-    if not answer or len(answer.strip()) < 10 or "i could not find" in answer.lower() or          "not in the provided" in answer.lower() or "no mention" in answer.lower():
+    # 7. Safety net (strong fallback)
+    unsupported_patterns = [
+        "i could not find",
+        "not in the provided",
+        "no mention",
+        "not explicitly mentioned",
+        "it seems",
+        "likely",
+        "appears to",
+        "not available in the provided context",
+    ]
+    if (
+        not answer
+        or len(answer.strip()) < 10
+        or any(pattern in answer.lower() for pattern in unsupported_patterns)
+    ):
         answer = FALLBACK
 
     print(f"\n💬 Answer:\n{answer}\n")
