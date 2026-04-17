@@ -9,6 +9,8 @@ Usage:
 """
 
 import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import sys
 import time
 from dotenv import load_dotenv
@@ -27,6 +29,7 @@ from query import (
     load_chunks,
     load_index,
     retrieve,
+    should_force_fallback,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -250,7 +253,6 @@ HALLUCINATION_PHRASES = [
     "according to my training",
     "i cannot access the internet",
     "it seems",
-    "likely",
     "appears to",
 ]
 
@@ -259,10 +261,7 @@ def is_fallback(answer: str) -> bool:
     low = answer.lower()
     return (
         FALLBACK_MSG.lower() in low
-        or "i could not find" in low
-        or "not in the provided" in low
-        or "no mention" in low
-        or len(answer.strip()) < 20
+        or should_force_fallback(answer)
     )
 
 

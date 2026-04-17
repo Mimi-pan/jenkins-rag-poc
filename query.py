@@ -35,6 +35,24 @@ STOPWORDS = {
     "how", "i", "in", "is", "it", "my", "of", "provide", "provides",
     "should", "tell", "the", "to", "what", "with",
 }
+UNSUPPORTED_PATTERNS = [
+    "i could not find",
+    "not in the provided",
+    "no mention",
+    "not explicitly mentioned",
+    "not explicitly state",
+    "not explicitly specify",
+    "not available in the provided context",
+    "based on the provided context",
+    "the provided context does not",
+    "the context does not",
+    "the documentation does not specify",
+    "there isn't a specific",
+    "there is no specific",
+    "it depends",
+    "however, the context",
+    "however, it",
+]
 
 SYSTEM_PROMPT = """You are a Jenkins documentation assistant.
 Answer the user's question STRICTLY using the context provided below.
@@ -215,6 +233,15 @@ def build_context(results: list[tuple]) -> tuple[str, list[str]]:
     return context, sources
 
 
+def should_force_fallback(answer: str) -> bool:
+    low = answer.lower().strip()
+    return (
+        not low
+        or len(low) < 10
+        or any(pattern in low for pattern in UNSUPPORTED_PATTERNS)
+    )
+
+
 def ask_llm(question: str, context: str, sources: list[str]) -> str:
     llm = OllamaLLM(
         model="mistral",
@@ -302,21 +329,7 @@ def main():
     answer = ask_llm(question, context, sources)
 
     # 7. Safety net (strong fallback)
-    unsupported_patterns = [
-        "i could not find",
-        "not in the provided",
-        "no mention",
-        "not explicitly mentioned",
-        "it seems",
-        "likely",
-        "appears to",
-        "not available in the provided context",
-    ]
-    if (
-        not answer
-        or len(answer.strip()) < 10
-        or any(pattern in answer.lower() for pattern in unsupported_patterns)
-    ):
+    if should_force_fallback(answer):
         answer = FALLBACK
 
     print(f"\n💬 Answer:\n{answer}\n")

@@ -29,6 +29,24 @@ STOPWORDS = {
     "how", "i", "in", "is", "it", "my", "of", "provide", "provides",
     "should", "tell", "the", "to", "what", "with",
 }
+UNSUPPORTED_PATTERNS = [
+    "i could not find",
+    "not in the provided",
+    "no mention",
+    "not explicitly mentioned",
+    "not explicitly state",
+    "not explicitly specify",
+    "not available in the provided context",
+    "based on the provided context",
+    "the provided context does not",
+    "the context does not",
+    "the documentation does not specify",
+    "there isn't a specific",
+    "there is no specific",
+    "it depends",
+    "however, the context",
+    "however, it",
+]
 
 SYSTEM_PROMPT = """
 You are a Jenkins assistant using retrieved context.
@@ -236,21 +254,7 @@ Source URLs available:
     answer = strip_inline_sources(answer)
 
     # Safety net
-    unsupported_patterns = [
-        "i could not find",
-        "not in the provided",
-        "no mention",
-        "not explicitly mentioned",
-        "it seems",
-        "likely",
-        "appears to",
-        "not available in the provided context",
-    ]
-    if (
-        not answer
-        or len(answer) < 10
-        or any(pattern in answer.lower() for pattern in unsupported_patterns)
-    ):
+    if should_force_fallback(answer):
         return FALLBACK, []
 
     return answer, sources
@@ -261,6 +265,15 @@ def strip_inline_sources(answer: str) -> str:
     cleaned = re.sub(r"(?is)\n*\**source\(s\)\**:\s*.*$", "", answer).strip()
     cleaned = re.sub(r"(?is)\n*\**sources\**:\s*.*$", "", cleaned).strip()
     return cleaned
+
+
+def should_force_fallback(answer: str) -> bool:
+    low = answer.lower().strip()
+    return (
+        not low
+        or len(low) < 10
+        or any(pattern in low for pattern in UNSUPPORTED_PATTERNS)
+    )
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
