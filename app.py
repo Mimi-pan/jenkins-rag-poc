@@ -55,6 +55,58 @@ def query_rag(question: str) -> tuple[str, list[str]]:
 
     # Retrieve
     results = vectorstore.similarity_search_with_score(question, k=TOP_K)
+    lowered_question = question.lower()
+
+    if "plugin" in lowered_question:
+        candidate_scores = {}
+        for doc, score in results:
+            candidate_scores[id(doc)] = (doc, score)
+
+        # FAISS may miss the exact plugin page entirely. Pull exact plugin
+        # metadata/URL matches from the local docstore into the candidate set.
+        docstore_dict = getattr(getattr(vectorstore, "docstore", None), "_dict", {})
+        for doc in docstore_dict.values():
+            metadata = doc.metadata or {}
+            if metadata.get("source_type") != "jenkins_plugin":
+                continue
+
+            plugin_name = str(metadata.get("plugin_name", "")).lower()
+            plugin_id = str(metadata.get("plugin_id", "")).lower()
+            source = str(metadata.get("source", "")).lower()
+
+            exact_match = (
+                (plugin_name and plugin_name in lowered_question)
+                or (plugin_id and plugin_id in lowered_question)
+                or (plugin_id and f"/{plugin_id}/" in source and plugin_id in lowered_question)
+            )
+            if exact_match and id(doc) not in candidate_scores:
+                candidate_scores[id(doc)] = (doc, 0.0)
+
+        reranked = []
+        for doc, score in candidate_scores.values():
+            adjusted_score = score
+            metadata = doc.metadata or {}
+            source_type = metadata.get("source_type")
+            plugin_name = str(metadata.get("plugin_name", "")).lower()
+            plugin_id = str(metadata.get("plugin_id", "")).lower()
+            source = str(metadata.get("source", "")).lower()
+
+            if source_type == "jenkins_plugin":
+                adjusted_score -= 0.2
+
+            if plugin_name and plugin_name in lowered_question:
+                adjusted_score -= 1.0
+            elif plugin_id and plugin_id in lowered_question:
+                adjusted_score -= 1.0
+
+            if plugin_id and f"/{plugin_id}/" in source and plugin_id in lowered_question:
+                adjusted_score -= 0.5
+
+            reranked.append((doc, score, adjusted_score))
+
+        reranked.sort(key=lambda item: item[2])
+        results = [(doc, original_score) for doc, original_score, _ in reranked[:TOP_K]]
+
     if not results:
         return FALLBACK, []
 
