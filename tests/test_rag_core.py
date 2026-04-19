@@ -2,6 +2,8 @@ from langchain_core.documents import Document
 
 from rag_core import (
     FALLBACK,
+    build_response_instructions,
+    detect_workflow_mode,
     has_question_support,
     should_force_fallback,
     strip_inline_sources,
@@ -53,3 +55,12 @@ def test_should_force_fallback_for_unsupported_patterns():
 
 def test_fallback_constant_is_stable():
     assert FALLBACK == "I could not find this in the Jenkins documentation."
+
+
+def test_detect_workflow_mode_for_pipeline_questions():
+    assert detect_workflow_mode("How do I set up a Jenkins pipeline?") == "pipeline"
+
+
+def test_build_response_instructions_for_troubleshooting_questions():
+    instructions = build_response_instructions("How do I debug a failed Jenkins build?")
+    assert "numbered troubleshooting steps" in instructions.lower()

@@ -64,6 +64,12 @@ If the answer is not explicitly supported by the context, respond exactly with:"
 - Keep the answer concise and factual.
 """
 
+WORKFLOW_KEYWORDS = {
+    "pipeline": ["pipeline", "jenkinsfile", "stage"],
+    "credentials": ["credential", "credentials", "secret", "token", "password"],
+    "troubleshooting": ["troubleshoot", "debug", "failure", "failed", "error", "issue", "broken"],
+}
+
 
 def tokenize_text(text: str) -> list[str]:
     """Tokenize text for lexical retrieval while keeping plugin-like terms intact."""
@@ -83,6 +89,39 @@ def extract_query_terms(question: str) -> list[str]:
         token for token in tokenize_text(question)
         if token not in STOPWORDS and len(token) >= 3
     ]
+
+
+def detect_workflow_mode(question: str) -> str | None:
+    """Detect common workflow-oriented questions that benefit from step-by-step answers."""
+    lowered = question.lower()
+    for mode, keywords in WORKFLOW_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return mode
+    return None
+
+
+def build_response_instructions(question: str) -> str:
+    """Add response-shape guidance for common workflow questions."""
+    mode = detect_workflow_mode(question)
+    if mode is None:
+        return "Answer in a short paragraph followed by a brief source-backed summary if helpful."
+
+    if mode == "pipeline":
+        return (
+            "Answer with numbered steps for setting up or understanding the pipeline. "
+            "Mention relevant Jenkinsfile concepts or stages only if supported by the context."
+        )
+
+    if mode == "credentials":
+        return (
+            "Answer with numbered steps for handling credentials safely in Jenkins. "
+            "Mention required Jenkins features or syntax only if explicitly supported by the context."
+        )
+
+    return (
+        "Answer with numbered troubleshooting steps. "
+        "Start with the most direct checks suggested by the context and avoid unsupported advice."
+    )
 
 
 def has_question_support(question: str, results: list[tuple[Document, float]]) -> bool:
@@ -266,6 +305,7 @@ def ask_llm(question: str, context: str, sources: list[str]) -> str:
     )
 
     source_text = ", ".join(sources) if sources else "unknown"
+    response_instructions = build_response_instructions(question)
     prompt = f"""{SYSTEM_PROMPT}
 
 Context:
@@ -273,6 +313,9 @@ Context:
 
 Question:
 {question}
+
+Response format:
+{response_instructions}
 
 Source URLs available:
 {source_text}
