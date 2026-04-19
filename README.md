@@ -3,7 +3,7 @@
 > **GSoC 2026 PoC** for the Jenkins AI Chatbot Plugin
 > Related PR: [jenkinsci/resources-ai-chatbot-plugin#318](https://github.com/jenkinsci/resources-ai-chatbot-plugin/pull/318)
 
-A fully local Retrieval-Augmented Generation (RAG) system that answers questions about Jenkins by grounding every response in the official Jenkins documentation. It **never hallucinates** — if the answer isn't in the indexed docs, it says so.
+A fully local Retrieval-Augmented Generation (RAG) system that answers questions about Jenkins by grounding every response in the official Jenkins documentation and selected plugin pages. If the answer is not supported by the indexed sources, it falls back instead of guessing.
 
 Runs 100% locally using [Ollama](https://ollama.com) — no cloud API or API key required.
 
@@ -12,7 +12,7 @@ Runs 100% locally using [Ollama](https://ollama.com) — no cloud API or API key
 ## Architecture
 
 ```
-Jenkins Docs (9 pages)
+Jenkins Docs + Plugin Pages (12 pages)
         │
         ▼
    ingest.py
@@ -21,16 +21,18 @@ Jenkins Docs (9 pages)
   │ 2. Chunk text (500 tok / 50 overlap) │
   │ 3. Embed (Ollama nomic-embed-text)   │
   │ 4. Store → FAISS index on disk       │
+  │ 5. Save raw chunks for BM25          │
   └──────────────────────────────────────┘
         │
         ▼  (jenkins_index/)
    query.py
   ┌──────────────────────────────────────┐
-  │ 1. Load FAISS index                  │
-  │ 2. Embed question (Ollama)           │
-  │ 3. Retrieve top-3 chunks             │
-  │ 4. Similarity threshold check        │
+  │ 1. Load FAISS + raw chunks           │
+  │ 2. Build BM25                        │
+  │ 3. Hybrid retrieve top-3 chunks      │
+  │ 4. Support / threshold checks        │
   │ 5. Mistral → grounded answer         │
+  │ 6. Final fallback safety net         │
   └──────────────────────────────────────┘
 ```
 
@@ -49,6 +51,9 @@ Jenkins Docs (9 pages)
 | Managing Jenkins | https://www.jenkins.io/doc/book/managing/ |
 | Managing Plugins | https://www.jenkins.io/doc/book/managing/plugins/ |
 | Reverse Proxy Troubleshooting | https://www.jenkins.io/doc/book/system-administration/reverse-proxy-configuration-troubleshooting/ |
+| Workflow Aggregator Plugin | https://plugins.jenkins.io/workflow-aggregator/ |
+| Git Plugin | https://plugins.jenkins.io/git/ |
+| Kubernetes Plugin | https://plugins.jenkins.io/kubernetes/ |
 
 ---
 
@@ -69,8 +74,8 @@ ollama pull mistral             # LLM for answering (~4.4 GB)
 
 ```bash
 # 1. Clone the project
-git clone https://github.com/jenkinsci/resources-ai-chatbot-plugin.git
-cd resources-ai-chatbot-plugin
+git clone <your-repo-url>
+cd jenkins-rag-poc
 
 # 2. Create and activate a virtual environment
 python -m venv .venv
@@ -102,7 +107,7 @@ Expected output:
   Fetching: https://www.jenkins.io/doc/book/pipeline/
     → 45,210 characters
   ...
-      Total pages fetched: 9
+      Total pages fetched: 12
 
 [2/4] Splitting text into chunks …
       Total chunks: 312
@@ -112,7 +117,7 @@ Expected output:
       Index saved → 'jenkins_index/'
 
 ✅ Ingestion complete!
-   312 chunks across 9 pages indexed.
+   312 chunks across 12 pages indexed.
 ```
 
 ### Step 2 — Query
@@ -126,9 +131,15 @@ python query.py "<your question here>"
 python query.py "<your question here>"
 ```
 
+### Step 2b — Streamlit UI
+
+```bash
+streamlit run app.py
+```
+
 ### Step 3 — Quality Check (optional)
 
-Run the full automated test suite (7 questions, 3 types):
+Run the full automated test suite (32 questions across 3 types):
 
 ```bash
 python test_quality.py
@@ -171,7 +182,12 @@ I could not find this in the Jenkins documentation.
 
 ## Quality Test Results
 
-Running `python test_quality.py` produces a full pass across all 7 test cases:
+Running `python test_quality.py` evaluates:
+- Type A: in-scope Jenkins questions
+- Type B: out-of-scope questions that should fallback
+- Type C: hallucination-trap questions that should fallback
+
+The current target is a full pass across all 32 test cases.
 
 ![Test results](demo_tests.png)
 
@@ -181,8 +197,9 @@ Running `python test_quality.py` produces a full pass across all 7 test cases:
 
 ```
 jenkins-rag-poc/
-├── ingest.py           # Crawl → chunk → embed → FAISS index
-├── query.py            # Load index → retrieve → Mistral → answer
+├── ingest.py           # Crawl → chunk → embed → save FAISS + raw chunks
+├── query.py            # Load index → hybrid retrieve → Mistral → answer
+├── app.py              # Streamlit chat UI
 ├── test_quality.py     # Automated quality check (Type A / B / C)
 ├── requirements.txt    # Python dependencies
 ├── .env.example        # Config template (copy to .env)
@@ -203,18 +220,28 @@ All settings are in `.env` (copy from `.env.example`):
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model name |
+| `OLLAMA_LLM_MODEL` | `mistral` | Generation model name |
+| `SIMILARITY_THRESHOLD` | `1.5` | Retrieval distance threshold before fallback |
 
-> The LLM model (`mistral`) is currently hardcoded in `query.py` and `test_quality.py`.
+Shared retrieval, prompting, and fallback logic now lives in `rag_core.py`, so the CLI, UI, and quality checks use the same behavior.
 
 ---
 
 ## How Hallucination Is Prevented
 
-Three layers of protection:
+The current pipeline uses multiple layers of protection:
 
-1. **Similarity threshold** — if the best L2 distance > `3.0`, the system returns a fallback message without calling the LLM at all.
-2. **Strict system prompt** — the LLM is instructed to answer *only* from the provided context and to say "I could not find this" if the context is insufficient.
-3. **Safety net** — the LLM's response is checked for fallback phrases (`"i could not find"`, `"not in the provided"`) and replaced with a standard message if matched.
+1. **Hybrid retrieval** — FAISS handles semantic similarity and BM25 helps with exact keywords such as plugin names.
+2. **Similarity threshold** — weak dense matches are rejected before generation.
+3. **Question-support check** — the retrieved content must contain enough evidence for the important query terms.
+4. **Strict system prompt** — the LLM is told to answer only from the retrieved context.
+5. **Safety net** — unsupported response patterns are normalized back to the standard fallback message.
+
+Fallback message:
+
+```text
+I could not find this in the Jenkins documentation.
+```
 
 ---
 

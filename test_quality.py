@@ -14,17 +14,16 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import sys
 import time
 from dotenv import load_dotenv
-from langchain_ollama import OllamaEmbeddings, OllamaLLM
 
-from query import (
+from rag_core import (
     FALLBACK,
     INDEX_PATH,
-    OLLAMA_BASE_URL,
     OLLAMA_EMBEDDING_MODEL,
     SIMILARITY_THRESHOLD,
     ask_llm,
     build_bm25,
     build_context,
+    create_embeddings,
     has_question_support,
     load_chunks,
     load_index,
@@ -35,7 +34,6 @@ from query import (
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-TOP_K = 3
 SPEED_LIMIT_SEC = 30
 FALLBACK_MSG = FALLBACK
 
@@ -43,7 +41,6 @@ FALLBACK_MSG = FALLBACK
 # ── Test Cases ────────────────────────────────────────────────────────────────
 
 TEST_CASES = [
-    # ── Type A: In-scope Jenkins questions ───────────────────────────────────
     {
         "type": "A",
         "question": "What is a Jenkinsfile?",
@@ -116,8 +113,6 @@ TEST_CASES = [
         "expect": "answer",
         "keywords": ["pipeline", "syntax"],
     },
-
-    # ── Type B: Out-of-scope questions ───────────────────────────────────────
     {
         "type": "B",
         "question": "What is the best restaurant in Bangkok?",
@@ -178,8 +173,6 @@ TEST_CASES = [
         "expect": "fallback",
         "keywords": [],
     },
-
-    # ── Type C: Hallucination traps / unsupported-but-near-Jenkins ───────────
     {
         "type": "C",
         "question": "Which Jenkins plugin is best for deploying to AWS?",
@@ -243,8 +236,6 @@ TEST_CASES = [
 ]
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 HALLUCINATION_PHRASES = [
     "as of my knowledge",
     "as an ai",
@@ -259,10 +250,7 @@ HALLUCINATION_PHRASES = [
 
 def is_fallback(answer: str) -> bool:
     low = answer.lower()
-    return (
-        FALLBACK_MSG.lower() in low
-        or should_force_fallback(answer)
-    )
+    return FALLBACK_MSG.lower() in low or should_force_fallback(answer)
 
 
 def has_hallucination(answer: str) -> bool:
@@ -277,7 +265,7 @@ def contains_keywords(answer: str, keywords: list[str]) -> bool:
     return any(k.lower() in low for k in keywords)
 
 
-def ask(vectorstore, llm, question: str, chunks, bm25) -> tuple[str, float, float]:
+def ask(vectorstore, question: str, chunks, bm25) -> tuple[str, float, float]:
     """Returns (answer, similarity_score, elapsed_seconds)."""
     t0 = time.time()
 
@@ -303,8 +291,6 @@ def ask(vectorstore, llm, question: str, chunks, bm25) -> tuple[str, float, floa
     return answer, best_score, time.time() - t0
 
 
-# ── Runner ────────────────────────────────────────────────────────────────────
-
 def run_tests():
     print("=" * 70)
     print("  Jenkins RAG — Hybrid Retrieval Quality Check")
@@ -316,11 +302,7 @@ def run_tests():
 
     print(f"\nLoading FAISS index with Ollama ({OLLAMA_EMBEDDING_MODEL}) ...")
     try:
-        embeddings = OllamaEmbeddings(
-            model=OLLAMA_EMBEDDING_MODEL,
-            base_url=OLLAMA_BASE_URL,
-        )
-        vectorstore = load_index(embeddings)
+        vectorstore = load_index(create_embeddings())
         chunks = load_chunks()
         bm25 = build_bm25(chunks)
     except FileNotFoundError:
@@ -332,7 +314,6 @@ def run_tests():
         print("    Make sure Ollama is running and the model is pulled.\n")
         sys.exit(1)
 
-    llm = OllamaLLM(model="mistral", temperature=0, verbose=False)
     print("Index loaded. Running tests ...\n")
 
     results = []
@@ -344,7 +325,7 @@ def run_tests():
         typ = tc["type"]
 
         print(f"[{i:02d}/{len(TEST_CASES)}] Type {typ} — {question}")
-        answer, score, elapsed = ask(vectorstore, llm, question, chunks, bm25)
+        answer, score, elapsed = ask(vectorstore, question, chunks, bm25)
         total_time += elapsed
 
         fell_back = is_fallback(answer)
@@ -356,7 +337,7 @@ def run_tests():
             passed = (not fell_back) and (not hallucinate) and keywords_ok and fast_enough
         elif tc["expect"] == "fallback":
             passed = fell_back and (not hallucinate) and fast_enough
-        else:  # fallback_or_answer
+        else:
             passed = ((fell_back or keywords_ok) and (not hallucinate) and fast_enough)
 
         verdict = "✅ PASS" if passed else "❌ FAIL"
