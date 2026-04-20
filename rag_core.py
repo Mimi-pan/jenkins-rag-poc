@@ -71,6 +71,16 @@ WORKFLOW_KEYWORDS = {
     "troubleshooting": ["troubleshoot", "debug", "failure", "failed", "error", "issue", "broken"],
 }
 
+UNSUPPORTED_DECISION_PATTERNS = [
+    r"\bbest\b",
+    r"\bfastest\b",
+    r"\bsafest\b",
+    r"\brecommended\b",
+    r"\bshould i choose\b",
+    r"\bwhich .* should i choose\b",
+    r"\bwhich .* is best\b",
+]
+
 
 @dataclass(frozen=True)
 class RetrievalDecision:
@@ -205,8 +215,17 @@ def build_response_instructions(question: str) -> str:
     )
 
 
+def is_unsupported_decision_question(question: str) -> bool:
+    """Reject subjective recommendation questions that the docs do not ground well."""
+    lowered = question.lower()
+    return any(re.search(pattern, lowered) for pattern in UNSUPPORTED_DECISION_PATTERNS)
+
+
 def has_question_support(question: str, results: list[tuple[Document, float]]) -> bool:
     """Reject answers when retrieved text does not support the query terms."""
+    if is_unsupported_decision_question(question):
+        return False
+
     terms = extract_query_terms(question)
     if not terms:
         return True
@@ -399,7 +418,8 @@ def should_force_fallback(answer: str) -> bool:
 
 def strip_inline_sources(answer: str) -> str:
     """Keep sources in the UI panel only, not in the model answer body."""
-    cleaned = re.sub(r"(?is)\n*\**source\(s\)\**:\s*.*$", "", answer).strip()
+    cleaned = re.sub(r"(?is)\n*\**source\**:\s*.*$", "", answer).strip()
+    cleaned = re.sub(r"(?is)\n*\**source\(s\)\**:\s*.*$", "", cleaned).strip()
     cleaned = re.sub(r"(?is)\n*\**sources\**:\s*.*$", "", cleaned).strip()
     return cleaned
 

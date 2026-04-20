@@ -6,6 +6,7 @@ from rag_core import (
     evaluate_retrieval,
     detect_workflow_mode,
     has_question_support,
+    is_unsupported_decision_question,
     retrieve,
     should_force_fallback,
     strip_inline_sources,
@@ -53,9 +54,36 @@ def test_has_question_support_rejects_unsupported_query():
     assert has_question_support("How do I configure AWS Lambda with Terraform?", results) is False
 
 
+def test_is_unsupported_decision_question_detects_subjective_requests():
+    assert is_unsupported_decision_question(
+        "Which Jenkins plugin should I choose for the fastest Kubernetes autoscaling?"
+    ) is True
+
+
+def test_has_question_support_rejects_subjective_recommendation_queries():
+    results = [
+        (
+            Document(
+                page_content="The Kubernetes plugin allocates Jenkins agents in Kubernetes pods.",
+                metadata={"title": "Kubernetes plugin", "plugin_name": "Kubernetes plugin"},
+            ),
+            0.28,
+        ),
+    ]
+    assert has_question_support(
+        "Which Jenkins plugin should I choose for the fastest Kubernetes autoscaling?",
+        results,
+    ) is False
+
+
 def test_strip_inline_sources_removes_source_footer():
     answer = "Use a Jenkinsfile for pipelines.\n\nSources: https://www.jenkins.io/doc/book/pipeline/"
     assert strip_inline_sources(answer) == "Use a Jenkinsfile for pipelines."
+
+
+def test_strip_inline_sources_removes_singular_source_footer():
+    answer = "Git plugin integrates Git repositories.\n\nSource: https://plugins.jenkins.io/git/"
+    assert strip_inline_sources(answer) == "Git plugin integrates Git repositories."
 
 
 def test_should_force_fallback_for_unsupported_patterns():

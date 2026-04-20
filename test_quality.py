@@ -19,6 +19,7 @@ from rag_core import (
     FALLBACK,
     INDEX_PATH,
     OLLAMA_EMBEDDING_MODEL,
+    SIMILARITY_THRESHOLD,
     ask_llm,
     build_bm25,
     create_embeddings,
