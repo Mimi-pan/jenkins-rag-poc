@@ -19,15 +19,12 @@ from rag_core import (
     FALLBACK,
     INDEX_PATH,
     OLLAMA_EMBEDDING_MODEL,
-    SIMILARITY_THRESHOLD,
     ask_llm,
     build_bm25,
-    build_context,
     create_embeddings,
-    has_question_support,
+    evaluate_retrieval,
     load_chunks,
     load_index,
-    retrieve,
     should_force_fallback,
 )
 
@@ -269,22 +266,15 @@ def ask(vectorstore, question: str, chunks, bm25) -> tuple[str, float, float]:
     """Returns (answer, similarity_score, elapsed_seconds)."""
     t0 = time.time()
 
-    results = retrieve(vectorstore, question, chunks=chunks, bm25=bm25)
-    if not results:
+    decision = evaluate_retrieval(question, vectorstore, chunks=chunks, bm25=bm25)
+    if not decision.results:
         return FALLBACK_MSG, 999.0, time.time() - t0
 
-    best_score = results[0][1]
-    if best_score > 0 and best_score > SIMILARITY_THRESHOLD:
+    best_score = decision.best_score if decision.best_score is not None else 999.0
+    if decision.should_fallback:
         return FALLBACK_MSG, best_score, time.time() - t0
 
-    if not has_question_support(question, results):
-        return FALLBACK_MSG, best_score, time.time() - t0
-
-    context, sources = build_context(results)
-    if not context:
-        return FALLBACK_MSG, best_score, time.time() - t0
-
-    answer = ask_llm(question, context, sources)
+    answer = ask_llm(question, decision.context, decision.sources)
     if is_fallback(answer) or has_hallucination(answer):
         return FALLBACK_MSG, best_score, time.time() - t0
 

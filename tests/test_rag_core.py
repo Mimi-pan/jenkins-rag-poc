@@ -3,12 +3,21 @@ from langchain_core.documents import Document
 from rag_core import (
     FALLBACK,
     build_response_instructions,
+    evaluate_retrieval,
     detect_workflow_mode,
     has_question_support,
     should_force_fallback,
     strip_inline_sources,
     tokenize_text,
 )
+
+
+class StubVectorStore:
+    def __init__(self, results):
+        self._results = results
+
+    def similarity_search_with_score(self, question, k=4):
+        return self._results[:k]
 
 
 def test_tokenize_text_keeps_plugin_style_terms():
@@ -64,3 +73,28 @@ def test_detect_workflow_mode_for_pipeline_questions():
 def test_build_response_instructions_for_troubleshooting_questions():
     instructions = build_response_instructions("How do I debug a failed Jenkins build?")
     assert "numbered troubleshooting steps" in instructions.lower()
+
+
+def test_evaluate_retrieval_marks_supported_results():
+    vectorstore = StubVectorStore([
+        (
+            Document(
+                page_content="The Git plugin provides Git support for Jenkins jobs and pipelines.",
+                metadata={"source": "https://plugins.jenkins.io/git/", "plugin_name": "Git plugin"},
+            ),
+            0.42,
+        ),
+    ])
+
+    decision = evaluate_retrieval("What does the Git plugin provide?", vectorstore)
+
+    assert decision.supported is True
+    assert decision.should_fallback is False
+    assert decision.sources == ["https://plugins.jenkins.io/git/"]
+
+
+def test_evaluate_retrieval_falls_back_when_no_results():
+    decision = evaluate_retrieval("What is a Jenkinsfile?", StubVectorStore([]))
+
+    assert decision.results == []
+    assert decision.should_fallback is True

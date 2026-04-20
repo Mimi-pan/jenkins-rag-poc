@@ -9,12 +9,9 @@ import sys
 
 from rag_core import (
     FALLBACK,
-    SIMILARITY_THRESHOLD,
-    build_context,
-    has_question_support,
+    evaluate_retrieval,
     load_pipeline,
     query_rag,
-    retrieve,
 )
 
 
@@ -34,20 +31,15 @@ def main():
     if bm25:
         print("   BM25 index loaded ✓")
 
-    results = retrieve(vectorstore, question, chunks=chunks, bm25=bm25)
-    if not results:
+    decision = evaluate_retrieval(question, vectorstore, chunks=chunks, bm25=bm25)
+    if not decision.results:
         print(f"💬 Answer:\n{FALLBACK}\n")
         return
 
-    best_score = results[0][1]
-    if best_score > 0:
-        print(f"   Best similarity distance: {best_score:.4f}")
-        if best_score > SIMILARITY_THRESHOLD:
-            print(f"\n💬 Answer:\n{FALLBACK}\n")
-            return
+    if decision.best_score is not None and decision.best_score > 0:
+        print(f"   Best similarity distance: {decision.best_score:.4f}")
 
-    context, _ = build_context(results)
-    if not context or not has_question_support(question, results):
+    if decision.should_fallback:
         print(f"\n💬 Answer:\n{FALLBACK}\n")
         return
 

@@ -6,6 +6,7 @@ import hashlib
 import os
 import pickle
 import re
+from dataclasses import dataclass
 from functools import lru_cache
 
 from dotenv import load_dotenv
@@ -69,6 +70,25 @@ WORKFLOW_KEYWORDS = {
     "credentials": ["credential", "credentials", "secret", "token", "password"],
     "troubleshooting": ["troubleshoot", "debug", "failure", "failed", "error", "issue", "broken"],
 }
+
+
+@dataclass(frozen=True)
+class RetrievalDecision:
+    """Shared retrieval state used by the CLI, UI, and quality checks."""
+    results: list[tuple[Document, float]]
+    best_score: float | None
+    context: str
+    sources: list[str]
+    supported: bool
+
+    @property
+    def should_fallback(self) -> bool:
+        """True when retrieval is too weak to support generation."""
+        if not self.results:
+            return True
+        if self.best_score is not None and self.best_score > 0 and self.best_score > SIMILARITY_THRESHOLD:
+            return True
+        return not self.context or not self.supported
 
 
 def tokenize_text(text: str) -> list[str]:
@@ -281,6 +301,33 @@ def build_context(results: list[tuple[Document, float]]) -> tuple[str, list[str]
     return context, sources
 
 
+def evaluate_retrieval(
+    question: str,
+    vectorstore: FAISS,
+    chunks: list[dict] | None = None,
+    bm25: BM25Okapi | None = None,
+) -> RetrievalDecision:
+    """Run retrieval plus support checks and return the combined decision."""
+    results = retrieve(vectorstore, question, chunks=chunks, bm25=bm25)
+    if not results:
+        return RetrievalDecision(
+            results=[],
+            best_score=None,
+            context="",
+            sources=[],
+            supported=False,
+        )
+
+    context, sources = build_context(results)
+    return RetrievalDecision(
+        results=results,
+        best_score=results[0][1],
+        context=context,
+        sources=sources,
+        supported=has_question_support(question, results),
+    )
+
+
 def should_force_fallback(answer: str) -> bool:
     low = answer.lower().strip()
     return (
@@ -338,20 +385,12 @@ def query_rag(
         if bm25 is None:
             bm25 = default_bm25
 
-    results = retrieve(vectorstore, question, chunks=chunks, bm25=bm25)
-    if not results:
+    decision = evaluate_retrieval(question, vectorstore, chunks=chunks, bm25=bm25)
+    if decision.should_fallback:
         return FALLBACK, []
 
-    best_score = results[0][1]
-    if best_score > 0 and best_score > SIMILARITY_THRESHOLD:
-        return FALLBACK, []
-
-    context, sources = build_context(results)
-    if not context or not has_question_support(question, results):
-        return FALLBACK, []
-
-    answer = ask_llm(question, context, sources)
+    answer = ask_llm(question, decision.context, decision.sources)
     if should_force_fallback(answer):
         return FALLBACK, []
 
-    return answer, sources
+    return answer, decision.sources
