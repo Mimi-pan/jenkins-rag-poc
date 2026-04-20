@@ -96,6 +96,67 @@ def tokenize_text(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+(?:[-_][a-z0-9]+)*", text.lower())
 
 
+def humanize_identifier(value: str) -> str:
+    """Convert plugin-like identifiers into a readable display name."""
+    return re.sub(r"[-_]+", " ", value).strip().lower()
+
+
+def get_plugin_aliases(metadata: dict | None) -> list[str]:
+    """Build normalized aliases for matching plugin-focused questions."""
+    metadata = metadata or {}
+    aliases = []
+
+    plugin_id = str(metadata.get("plugin_id", "")).strip().lower()
+    plugin_name = str(metadata.get("plugin_name", "")).strip().lower()
+    source = str(metadata.get("source", "")).strip().lower()
+    source_slug = source.rstrip("/").split("/")[-1] if source else ""
+
+    for raw_value in metadata.get("plugin_aliases", []):
+        alias = str(raw_value).strip().lower()
+        if alias:
+            aliases.append(alias)
+
+    for alias in [plugin_id, plugin_name, source_slug]:
+        if alias:
+            aliases.append(alias)
+        if alias and ("-" in alias or "_" in alias):
+            aliases.append(humanize_identifier(alias))
+
+    seen = set()
+    normalized = []
+    for alias in aliases:
+        if alias and alias not in seen:
+            normalized.append(alias)
+            seen.add(alias)
+    return normalized
+
+
+def get_plugin_match_score(question: str, metadata: dict | None) -> float:
+    """Return a small reranking boost when the query targets a plugin page."""
+    aliases = get_plugin_aliases(metadata)
+    if not aliases:
+        return 0.0
+
+    lowered = question.lower()
+    query_tokens = set(tokenize_text(question))
+    best_score = 0.0
+
+    for alias in aliases:
+        alias_tokens = set(tokenize_text(alias))
+        if not alias_tokens:
+            continue
+        if alias in lowered:
+            best_score = max(best_score, 0.08)
+            continue
+        if alias_tokens.issubset(query_tokens):
+            best_score = max(best_score, 0.06)
+            continue
+        if len(alias_tokens) > 1 and len(alias_tokens & query_tokens) >= 2:
+            best_score = max(best_score, 0.04)
+
+    return best_score
+
+
 def make_result_key(text: str, metadata: dict | None = None) -> str:
     """Create a stable key for deduplicating retrieval results."""
     source = str((metadata or {}).get("source", "unknown"))
@@ -227,6 +288,7 @@ def retrieve(
     candidate_k = min(10, TOP_K * 3)
     rrf_k = 60
     lowered = question.lower()
+    query_tokens = set(tokenize_text(question))
 
     faiss_results = vectorstore.similarity_search_with_score(question, k=candidate_k)
 
@@ -266,17 +328,15 @@ def retrieve(
     for key, rrf_score in rrf_scores.items():
         doc = doc_store[key]
         adjusted_rrf = rrf_score
+        metadata = doc.metadata or {}
+        plugin_match_score = get_plugin_match_score(question, metadata)
 
-        if "plugin" in lowered:
-            metadata = doc.metadata or {}
-            plugin_name = str(metadata.get("plugin_name", "")).lower()
-            plugin_id = str(metadata.get("plugin_id", "")).lower()
+        if "plugin" in lowered or plugin_match_score > 0:
             if metadata.get("source_type") == "jenkins_plugin":
                 adjusted_rrf += 0.02
-            if plugin_name and plugin_name in lowered:
-                adjusted_rrf += 0.05
-            if plugin_id and plugin_id in lowered:
-                adjusted_rrf += 0.05
+                if "plugin" in query_tokens:
+                    adjusted_rrf += 0.01
+            adjusted_rrf += plugin_match_score
 
         candidates.append((doc, faiss_score_store[key], adjusted_rrf))
 

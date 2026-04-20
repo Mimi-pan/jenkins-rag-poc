@@ -6,6 +6,7 @@ from rag_core import (
     evaluate_retrieval,
     detect_workflow_mode,
     has_question_support,
+    retrieve,
     should_force_fallback,
     strip_inline_sources,
     tokenize_text,
@@ -98,3 +99,29 @@ def test_evaluate_retrieval_falls_back_when_no_results():
 
     assert decision.results == []
     assert decision.should_fallback is True
+
+
+def test_retrieve_boosts_plugin_slug_queries_without_plugin_keyword():
+    docs_result = (
+        Document(
+            page_content="Pipeline syntax explains declarative and scripted pipeline structure.",
+            metadata={"source": "https://www.jenkins.io/doc/book/pipeline/", "source_type": "jenkins_docs"},
+        ),
+        0.20,
+    )
+    plugin_result = (
+        Document(
+            page_content="This plugin and its dependencies form a suite of plugins for Jenkins Pipeline.",
+            metadata={
+                "source": "https://plugins.jenkins.io/workflow-aggregator/",
+                "source_type": "jenkins_plugin",
+                "plugin_id": "workflow-aggregator",
+                "plugin_name": "Pipeline",
+            },
+        ),
+        0.25,
+    )
+
+    results = retrieve(StubVectorStore([docs_result, plugin_result]), "workflow-aggregator")
+
+    assert results[0][0].metadata["source"] == "https://plugins.jenkins.io/workflow-aggregator/"

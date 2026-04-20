@@ -46,6 +46,11 @@ def derive_title(soup: BeautifulSoup) -> str:
     return re.sub(r"\s+", " ", title_tag.get_text(" ", strip=True)).strip()
 
 
+def humanize_identifier(value: str) -> str:
+    """Convert plugin-like identifiers into a readable display name."""
+    return re.sub(r"[-_]+", " ", value).strip().title()
+
+
 def build_page_metadata(url: str, source_type: str, soup: BeautifulSoup) -> dict:
     """Build stable metadata for a fetched page."""
     parsed = urlparse(url)
@@ -59,10 +64,29 @@ def build_page_metadata(url: str, source_type: str, soup: BeautifulSoup) -> dict
 
     if source_type == "jenkins_plugin":
         plugin_id = path_parts[0] if path_parts else ""
+        fallback_name = humanize_identifier(plugin_id)
+        raw_title = metadata["title"].strip()
+        plugin_name = raw_title
+
+        # Some plugin pages expose a generic title like "Pipeline".
+        # Keep the slug-derived name so retrieval can still match the plugin.
+        if not plugin_name or (plugin_id and plugin_id not in tokenize_title(plugin_name)):
+            plugin_name = fallback_name
+
         metadata["plugin_id"] = plugin_id
-        metadata["plugin_name"] = metadata["title"] or plugin_id.replace("-", " ").title()
+        metadata["plugin_name"] = plugin_name
+        metadata["plugin_aliases"] = [
+            alias
+            for alias in [plugin_id, fallback_name, raw_title]
+            if alias
+        ]
 
     return metadata
+
+
+def tokenize_title(value: str) -> set[str]:
+    """Lightweight tokenization for comparing plugin titles with slug terms."""
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
 
 
 def extract_docs_text(soup: BeautifulSoup) -> str:
