@@ -198,8 +198,10 @@ The current target is a full pass across all 32 test cases.
 ```
 jenkins-rag-poc/
 ├── ingest.py           # Crawl → chunk → embed → save FAISS + raw chunks
-├── query.py            # Load index → hybrid retrieve → Mistral → answer
+├── rag_core.py         # Shared retrieval, prompting, and fallback logic
+├── query.py            # CLI: load index → hybrid retrieve → Mistral → answer
 ├── app.py              # Streamlit chat UI
+├── demo_env.py         # Runtime env defaults for local demo (OpenMP fix)
 ├── test_quality.py     # Automated quality check (Type A / B / C)
 ├── requirements.txt    # Python dependencies
 ├── .env.example        # Config template (copy to .env)

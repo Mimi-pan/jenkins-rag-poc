@@ -160,12 +160,12 @@ def crawl_pages(sources: list[dict]) -> list[dict]:
         url = source["url"]
         source_type = source.get("source_type", "jenkins_docs")
 
-        print("INDEXING:", url)
+        print(f"  Fetching: {url}")
 
         try:
             page = fetch_page(url, source_type)
             pages.append(page)
-            print(f" -> {len(page['text'])} characters")
+            print(f"    → {len(page['text']):,} characters")
 
         except Exception as exc:
             print(f" X Failed ({exc})")
