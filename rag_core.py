@@ -9,6 +9,10 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 
+from demo_env import configure_openmp
+
+configure_openmp()
+
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -48,7 +52,6 @@ UNSUPPORTED_PATTERNS = [
     "there is no specific",
     "it depends",
     "however, the context",
-    "however, it",
 ]
 
 SYSTEM_PROMPT = """
@@ -63,6 +66,8 @@ If the answer is not explicitly supported by the context, respond exactly with:"
 - If the question is about a specific plugin (e.g., Git plugin, Kubernetes plugin), try to match the plugin name in the context.
 - Always include the source URL(s) at the end of your answer under "Sources:".
 - Keep the answer concise and factual.
+- Prefer 2-4 short bullets or steps.
+- Do not include code blocks unless the user explicitly asks for an example.
 """
 
 WORKFLOW_KEYWORDS = {
@@ -167,6 +172,28 @@ def get_plugin_match_score(question: str, metadata: dict | None) -> float:
     return best_score
 
 
+def is_explicit_plugin_query(question: str, metadata: dict | None) -> bool:
+    """True when a plugin page is directly targeted by the query."""
+    metadata = metadata or {}
+    lowered = question.lower()
+    query_tokens = set(tokenize_text(question))
+    plugin_id = str(metadata.get("plugin_id", "")).strip().lower()
+    source = str(metadata.get("source", "")).strip().lower()
+    source_slug = source.rstrip("/").split("/")[-1] if source else ""
+
+    if "plugin" in query_tokens:
+        return True
+
+    for alias in [plugin_id, source_slug]:
+        alias_tokens = set(tokenize_text(alias))
+        if alias and alias in lowered:
+            return True
+        if alias_tokens and alias_tokens.issubset(query_tokens):
+            return True
+
+    return False
+
+
 def make_result_key(text: str, metadata: dict | None = None) -> str:
     """Create a stable key for deduplicating retrieval results."""
     source = str((metadata or {}).get("source", "unknown"))
@@ -195,22 +222,23 @@ def build_response_instructions(question: str) -> str:
     """Add response-shape guidance for common workflow questions."""
     mode = detect_workflow_mode(question)
     if mode is None:
-        return "Answer in a short paragraph followed by a brief source-backed summary if helpful."
+        return "Use 1 short paragraph or up to 3 bullets."
 
     if mode == "pipeline":
         return (
-            "Answer with numbered steps for setting up or understanding the pipeline. "
-            "Mention relevant Jenkinsfile concepts or stages only if supported by the context."
+            "Use up to 4 numbered steps. "
+            "Mention relevant Jenkinsfile concepts or stages only if supported by the context. "
+            "Do not include a full Jenkinsfile example unless explicitly requested."
         )
 
     if mode == "credentials":
         return (
-            "Answer with numbered steps for handling credentials safely in Jenkins. "
+            "Use up to 4 numbered steps for handling credentials safely in Jenkins. "
             "Mention required Jenkins features or syntax only if explicitly supported by the context."
         )
 
     return (
-        "Answer with numbered troubleshooting steps. "
+        "Use up to 4 numbered troubleshooting steps. "
         "Start with the most direct checks suggested by the context and avoid unsupported advice."
     )
 
@@ -349,12 +377,22 @@ def retrieve(
         adjusted_rrf = rrf_score
         metadata = doc.metadata or {}
         plugin_match_score = get_plugin_match_score(question, metadata)
+        is_plugin_page = metadata.get("source_type") == "jenkins_plugin"
+        explicit_plugin_query = is_explicit_plugin_query(question, metadata)
 
-        if "plugin" in lowered or plugin_match_score > 0:
-            if metadata.get("source_type") == "jenkins_plugin":
+        if is_plugin_page and not explicit_plugin_query:
+            continue
+
+        if explicit_plugin_query or plugin_match_score > 0:
+            if is_plugin_page and explicit_plugin_query:
                 adjusted_rrf += 0.02
                 if "plugin" in query_tokens:
                     adjusted_rrf += 0.01
+                page_text = doc.page_content.lower()
+                if "provide" in query_tokens and "plugin provides" in page_text:
+                    adjusted_rrf += 0.08
+                if page_text.startswith("introduction"):
+                    adjusted_rrf += 0.03
             adjusted_rrf += plugin_match_score
 
         candidates.append((doc, faiss_score_store[key], adjusted_rrf))
@@ -416,12 +454,65 @@ def should_force_fallback(answer: str) -> bool:
     )
 
 
-def strip_inline_sources(answer: str) -> str:
+def renumber_numbered_lines(answer: str) -> str:
+    """Keep numbered answers sequential after cleanup removes a step."""
+    next_number = 1
+    lines = []
+    for line in answer.splitlines():
+        match = re.match(r"^(\s*)\d+([.)]\s+)(.*)$", line)
+        if match:
+            line = f"{match.group(1)}{next_number}{match.group(2)}{match.group(3)}"
+            next_number += 1
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def strip_inline_sources(answer: str, sources: list[str] | None = None) -> str:
     """Keep sources in the UI panel only, not in the model answer body."""
-    cleaned = re.sub(r"(?is)\n*\**source\**:\s*.*$", "", answer).strip()
+    cleaned = re.sub(r"(?is)^\s*\**answer\**:\s*", "", answer).strip()
+    cleaned = re.sub(
+        r"(?is)^\s*answer with numbered steps for [^:\n]+:\s*",
+        "",
+        cleaned,
+    ).strip()
+    cleaned = re.sub(
+        r"(?is)^\s*use numbered steps for [^:\n]+:\s*",
+        "",
+        cleaned,
+    ).strip()
+    cleaned = re.sub(
+        r"(?im)^\s*(?:\d+[.)]\s*)?for more .*refer to .*https?://\S+.*$",
+        "",
+        cleaned,
+    ).strip()
+    cleaned = re.sub(r"(?is)\n*\**source\**:\s*.*$", "", cleaned).strip()
     cleaned = re.sub(r"(?is)\n*\**source\(s\)\**:\s*.*$", "", cleaned).strip()
     cleaned = re.sub(r"(?is)\n*\**sources\**:\s*.*$", "", cleaned).strip()
-    return cleaned
+    cleaned = re.sub(r"(?im)^\s*\**answer\**\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?is)\n*here'?s an example.*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?is)\n*here'?s a snippet.*$", "", cleaned).strip()
+    cleaned = re.sub(r"(?is)\n*```.*?```", "", cleaned).strip()
+    cleaned = re.sub(r"(?im)^\s*(?:for example|e\.g\.)\s*:?\s*$", "", cleaned).strip()
+    cleaned = re.sub(
+        r"(?im)^\s*\d+[.)]\s+.*(?:for example|as follows|set the environment variable).*:\s*$",
+        "",
+        cleaned,
+    ).strip()
+
+    allowed_sources = set(sources or [])
+
+    def remove_unavailable_url(match: re.Match) -> str:
+        url = match.group(0).rstrip(").,]")
+        if url in allowed_sources:
+            return match.group(0)
+        return ""
+
+    cleaned = re.sub(r"https?://[^\s<>)\]]+", remove_unavailable_url, cleaned)
+    cleaned = re.sub(r"\(<>\)", "", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
+    cleaned = re.sub(r"[ \t]+([.,;:])", r"\1", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return renumber_numbered_lines(cleaned)
 
 
 def ask_llm(question: str, context: str, sources: list[str]) -> str:
@@ -441,7 +532,7 @@ Context:
 Question:
 {question}
 
-Response format:
+Style guidance:
 {response_instructions}
 
 Source URLs available:
@@ -450,7 +541,7 @@ Source URLs available:
 
     response = llm.invoke(prompt)
     answer = response.strip() if isinstance(response, str) else str(response).strip()
-    return strip_inline_sources(answer)
+    return strip_inline_sources(answer, sources)
 
 
 def query_rag(

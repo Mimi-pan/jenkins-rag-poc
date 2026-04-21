@@ -6,6 +6,11 @@ import os
 import re
 import pickle
 from urllib.parse import urlparse
+
+from demo_env import configure_openmp
+
+configure_openmp()
+
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
