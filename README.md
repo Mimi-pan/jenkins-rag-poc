@@ -74,7 +74,7 @@ ollama pull mistral             # LLM for answering (~4.4 GB)
 
 ```bash
 # 1. Clone the project
-git clone <your-repo-url>
+git clone https://github.com/Mimi-pan/jenkins-rag-poc.git
 cd jenkins-rag-poc
 
 # 2. Create and activate a virtual environment
