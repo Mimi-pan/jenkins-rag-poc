@@ -1,5 +1,6 @@
 from langchain_core.documents import Document
 
+import demo_env
 from rag_core import (
     FALLBACK,
     build_response_instructions,
@@ -8,10 +9,19 @@ from rag_core import (
     has_question_support,
     is_unsupported_decision_question,
     retrieve,
+    renumber_numbered_lines,
     should_force_fallback,
     strip_inline_sources,
     tokenize_text,
 )
+
+
+def test_configure_openmp_sets_demo_default(monkeypatch):
+    monkeypatch.delenv("KMP_DUPLICATE_LIB_OK", raising=False)
+
+    demo_env.configure_openmp()
+
+    assert demo_env.os.environ["KMP_DUPLICATE_LIB_OK"] == "TRUE"
 
 
 class StubVectorStore:
@@ -86,9 +96,106 @@ def test_strip_inline_sources_removes_singular_source_footer():
     assert strip_inline_sources(answer) == "Git plugin integrates Git repositories."
 
 
+def test_strip_inline_sources_removes_demo_noise():
+    answer = (
+        "Answer:\n\nUse a Jenkinsfile for pipelines.\n\n"
+        "5. For more information, refer to the official Jenkins documentation: "
+        "https://www.jenkins.io/doc/book/pipeline/jenkinsfile/"
+    )
+
+    assert strip_inline_sources(answer) == "Use a Jenkinsfile for pipelines."
+
+
+def test_strip_inline_sources_removes_detailed_reference_line():
+    answer = (
+        "The Git plugin integrates Git repositories.\n\n"
+        "For more detailed information, please refer to https://plugins.jenkins.io/git/."
+    )
+
+    assert strip_inline_sources(answer) == "The Git plugin integrates Git repositories."
+
+
+def test_strip_inline_sources_removes_unavailable_inline_url():
+    answer = (
+        "Configure credentials in Jenkins by following the documentation "
+        "(https://www.jenkins.io/doc/book/managing-credentials/)."
+    )
+
+    assert strip_inline_sources(
+        answer,
+        sources=["https://www.jenkins.io/doc/book/using/using-credentials/"],
+    ) == "Configure credentials in Jenkins by following the documentation."
+
+
+def test_strip_inline_sources_removes_echoed_step_instruction():
+    answer = (
+        "Answer with numbered steps for setting up or understanding a Jenkinsfile:\n\n"
+        "1. A Jenkinsfile is a text file that contains the definition of a Jenkins Pipeline."
+    )
+
+    assert strip_inline_sources(answer).startswith("1. A Jenkinsfile is a text file")
+
+
+def test_strip_inline_sources_removes_trailing_answer_label():
+    answer = "The Git plugin integrates Git repositories.\n\nAnswer"
+
+    assert strip_inline_sources(answer) == "The Git plugin integrates Git repositories."
+
+
+def test_strip_inline_sources_removes_example_code_block():
+    answer = """Use the parallel keyword inside a stage.
+
+Here's an example from your provided context:
+
+```groovy
+pipeline {
+    agent any
+}
+```"""
+
+    assert strip_inline_sources(answer) == "Use the parallel keyword inside a stage."
+
+
+def test_strip_inline_sources_removes_dangling_snippet_intro():
+    answer = (
+        "Use the parallel keyword inside a stage.\n\n"
+        "Here's a snippet from the provided context that demonstrates running parallel stages:"
+    )
+
+    assert strip_inline_sources(answer) == "Use the parallel keyword inside a stage."
+
+
+def test_strip_inline_sources_removes_dangling_numbered_example_intro():
+    answer = """1. Configure the credential in Jenkins.
+
+2. In your Jenkinsfile, set the environment variable for the credential you want to use:
+
+3. The credentials helper expands username and password variables."""
+
+    assert strip_inline_sources(answer) == (
+        "1. Configure the credential in Jenkins.\n\n"
+        "2. The credentials helper expands username and password variables."
+    )
+
+
+def test_renumber_numbered_lines_keeps_sequence():
+    answer = "2. Second step\n\n4. Fourth step"
+
+    assert renumber_numbered_lines(answer) == "1. Second step\n\n2. Fourth step"
+
+
 def test_should_force_fallback_for_unsupported_patterns():
     answer = "Based on the provided context, there is no specific answer."
     assert should_force_fallback(answer) is True
+
+
+def test_should_not_force_fallback_for_supported_caveats():
+    answer = (
+        "The Git plugin can apply tags to the Git repository in the workspace. "
+        "However, it does not push the applied tag to another location."
+    )
+
+    assert should_force_fallback(answer) is False
 
 
 def test_fallback_constant_is_stable():
@@ -101,7 +208,14 @@ def test_detect_workflow_mode_for_pipeline_questions():
 
 def test_build_response_instructions_for_troubleshooting_questions():
     instructions = build_response_instructions("How do I debug a failed Jenkins build?")
-    assert "numbered troubleshooting steps" in instructions.lower()
+    assert "up to 4 numbered troubleshooting steps" in instructions.lower()
+
+
+def test_build_response_instructions_limits_pipeline_examples():
+    instructions = build_response_instructions("How do I run parallel stages in Jenkins?")
+
+    assert "up to 4 numbered steps" in instructions.lower()
+    assert "do not include a full jenkinsfile example" in instructions.lower()
 
 
 def test_evaluate_retrieval_marks_supported_results():
@@ -153,3 +267,69 @@ def test_retrieve_boosts_plugin_slug_queries_without_plugin_keyword():
     results = retrieve(StubVectorStore([docs_result, plugin_result]), "workflow-aggregator")
 
     assert results[0][0].metadata["source"] == "https://plugins.jenkins.io/workflow-aggregator/"
+
+
+def test_retrieve_penalizes_generic_plugin_page_for_non_plugin_query():
+    plugin_result = (
+        Document(
+            page_content="This plugin and its dependencies form a suite of plugins for Jenkins Pipeline.",
+            metadata={
+                "source": "https://plugins.jenkins.io/workflow-aggregator/",
+                "source_type": "jenkins_plugin",
+                "plugin_id": "workflow-aggregator",
+                "plugin_name": "Pipeline",
+            },
+        ),
+        0.10,
+    )
+    credentials_result = (
+        Document(
+            page_content="Handling credentials in Pipeline uses credential IDs and bindings.",
+            metadata={
+                "source": "https://www.jenkins.io/doc/book/using/using-credentials/",
+                "source_type": "jenkins_docs",
+            },
+        ),
+        0.12,
+    )
+
+    results = retrieve(
+        StubVectorStore([plugin_result, credentials_result]),
+        "How do I use credentials in Jenkins pipeline?",
+    )
+
+    assert results[0][0].metadata["source"] == "https://www.jenkins.io/doc/book/using/using-credentials/"
+
+
+def test_retrieve_boosts_plugin_overview_for_provide_questions():
+    config_result = (
+        Document(
+            page_content="This option configures polling and repository checkout behavior.",
+            metadata={
+                "source": "https://plugins.jenkins.io/git/",
+                "source_type": "jenkins_plugin",
+                "plugin_id": "git",
+                "plugin_name": "Git",
+            },
+        ),
+        0.10,
+    )
+    overview_result = (
+        Document(
+            page_content="Introduction The git plugin provides fundamental git operations for Jenkins projects.",
+            metadata={
+                "source": "https://plugins.jenkins.io/git/",
+                "source_type": "jenkins_plugin",
+                "plugin_id": "git",
+                "plugin_name": "Git",
+            },
+        ),
+        0.15,
+    )
+
+    results = retrieve(
+        StubVectorStore([config_result, overview_result]),
+        "What does the Git plugin provide in Jenkins?",
+    )
+
+    assert "plugin provides" in results[0][0].page_content.lower()
