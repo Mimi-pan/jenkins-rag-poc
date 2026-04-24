@@ -6,10 +6,10 @@ beautifulsoup4==4.12.3
 lxml==5.2.2
 
 # LangChain core + integrations
-langchain==0.2.16
-langchain-community==0.2.16
-langchain-ollama==0.2.3
-langchain-text-splitters==0.2.4
+langchain==1.2.14
+langchain-community==0.4.1
+langchain-ollama==1.1.0
+langchain-text-splitters==1.1.1
 
 # Vector store
 faiss-cpu==1.8.0
@@ -22,6 +22,10 @@ python-dotenv==1.0.1
 
 # UI
 streamlit==1.44.1
+
+# API
+fastapi==0.115.12
+uvicorn==0.34.0
 
 # Tests
 pytest==8.3.5
