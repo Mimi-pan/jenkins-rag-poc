@@ -32,8 +32,13 @@ FALLBACK = "I could not find this in the Jenkins documentation."
 
 STOPWORDS = {
     "a", "an", "and", "are", "best", "can", "do", "does", "for", "help",
-    "how", "i", "in", "is", "it", "my", "of", "provide", "provides",
-    "should", "tell", "the", "to", "what", "with",
+    "how", "i", "in", "is", "it", "me", "my", "of", "provide", "provides",
+    "should", "tell", "the", "to", "use", "what", "when", "where", "which",
+    "who", "why", "with",
+    # generic English words that appear in any text and give false support signal
+    "explain", "simple", "terms", "give", "show", "list", "make",
+    "need", "want", "know", "get", "run", "let", "say", "work",
+    "deploy",  # generic tech verb - appears in Jenkins docs but not Jenkins-specific
 }
 
 UNSUPPORTED_PATTERNS = [
@@ -84,6 +89,12 @@ UNSUPPORTED_DECISION_PATTERNS = [
     r"\bshould i choose\b",
     r"\bwhich .* should i choose\b",
     r"\bwhich .* is best\b",
+    # Type C: factual traps that docs don't explicitly support
+    r"\bguarantee\b",
+    r"\bexact .* threshold\b",
+    r"\bevery .* automatically\b",
+    r"\bpredict .* automatically\b",
+    r"\bremove all\b",
 ]
 
 
@@ -274,7 +285,6 @@ def has_question_support(question: str, results: list[tuple[Document, float]]) -
 
     if len(terms) == 1:
         return len(matched_terms) == 1
-
     required_matches = min(2, len(terms))
     return len(set(matched_terms)) >= required_matches
 
