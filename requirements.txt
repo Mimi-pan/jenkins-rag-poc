@@ -1,7 +1,7 @@
 # requirements.txt — Jenkins RAG PoC dependencies
 
 # Web crawling & HTML parsing
-requests==2.32.3
+requests>=2.32.5
 beautifulsoup4==4.12.3
 lxml==5.2.2
 
