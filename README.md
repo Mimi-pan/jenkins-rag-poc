@@ -137,6 +137,42 @@ python query.py "<your question here>"
 streamlit run app.py
 ```
 
+![Streamlit UI — In-scope answers](demo_app_1.png)
+
+![Streamlit UI — Fallback response](demo_app_2.png)
+
+### Step 2c — FastAPI (optional)
+
+```bash
+uvicorn api:app --reload
+```
+
+API will be available at `http://localhost:8000`
+
+**Check health:**
+```bash
+curl http://localhost:8000/health
+```
+
+**Ask a question:**
+```bash
+curl -X POST http://localhost:8000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is a Jenkinsfile?"}'
+```
+
+**Example response:**
+```json
+{
+  "question": "What is a Jenkinsfile?",
+  "answer": "A Jenkinsfile is a text file that defines a Jenkins Pipeline...",
+  "sources": ["https://www.jenkins.io/doc/book/pipeline/jenkinsfile/"],
+  "fallback": false
+}
+```
+
+Interactive API docs: `http://localhost:8000/docs`
+
 ### Step 3 — Quality Check (optional)
 
 Run the full automated test suite (32 questions across 3 types):
@@ -182,12 +218,13 @@ I could not find this in the Jenkins documentation.
 
 ## Quality Test Results
 
-Running `python test_quality.py` evaluates:
-- Type A: in-scope Jenkins questions
-- Type B: out-of-scope questions that should fallback
-- Type C: hallucination-trap questions that should fallback
+Running `python test_quality.py` evaluates 32 questions across 3 types:
 
-The current target is a full pass across all 32 test cases.
+- **Type A (In-scope):** 12 Jenkins questions — must be answered correctly
+- **Type B (Out-of-scope):** 10 questions — must return fallback
+- **Type C (Hallucination trap):** 10 trick questions — must return fallback
+
+Current result: **32/32 passed** — 0 hallucinations, avg response time 1.8s
 
 ![Test results](demo_tests.png)
 
